@@ -1,18 +1,24 @@
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
+const { COOKIE_NAME } = require("../utils/authCookie");
 
 /**
  * Verify JWT and attach user to req.user.
- * Use on routes that require authentication (e.g. GET /auth/me, POST /auth/logout).
+ * Token: Authorization: Bearer <jwt> OR httpOnly cookie (name from AUTH_COOKIE_NAME, default "token").
  */
 const authenticate = async (req, res, next) => {
   try {
+    let token = null;
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).json({ success: false, message: "Access denied. No token provided." });
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      token = authHeader.split(" ")[1];
+    } else if (req.cookies && req.cookies[COOKIE_NAME]) {
+      token = req.cookies[COOKIE_NAME];
     }
 
-    const token = authHeader.split(" ")[1];
+    if (!token) {
+      return res.status(401).json({ success: false, message: "Access denied. No token provided." });
+    }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
     const [rows] = await pool.query(

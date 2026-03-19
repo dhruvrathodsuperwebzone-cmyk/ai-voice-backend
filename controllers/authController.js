@@ -1,6 +1,7 @@
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const pool = require("../config/db");
+const { COOKIE_NAME, getCookieOptions, clearCookieOptions } = require("../utils/authCookie");
 
 const SALT_ROUNDS = 10;
 const TOKEN_EXPIRY = process.env.JWT_EXPIRY || "7d"; // e.g. "7d", "24h"
@@ -56,6 +57,7 @@ const register = async (req, res) => {
       role,
       phone: phone || null,
     };
+    res.cookie(COOKIE_NAME, token, getCookieOptions());
     res.status(201).json({
       success: true,
       message: "User registered successfully.",
@@ -122,6 +124,7 @@ const login = async (req, res) => {
       phone: user.phone,
       created_at: user.created_at,
     };
+    res.cookie(COOKIE_NAME, token, getCookieOptions());
     res.json({
       success: true,
       message: "Login successful.",
@@ -162,6 +165,7 @@ const me = async (req, res) => {
  */
 const logout = async (req, res) => {
   try {
+    res.clearCookie(COOKIE_NAME, clearCookieOptions());
     res.json({
       success: true,
       message: "Logged out successfully.",
