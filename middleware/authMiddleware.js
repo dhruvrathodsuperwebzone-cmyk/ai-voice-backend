@@ -17,7 +17,7 @@ const authenticate = async (req, res, next) => {
     }
 
     if (!token) {
-      return res.status(401).json({ success: false, message: "Access denied. No token provided." });
+      return res.status(401).json({ success: false, message: "Please log in again." });
     }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
@@ -26,17 +26,17 @@ const authenticate = async (req, res, next) => {
       [decoded.userId]
     );
     if (!rows || rows.length === 0) {
-      return res.status(401).json({ success: false, message: "User not found." });
+      return res.status(401).json({ success: false, message: "Please log in again." });
     }
 
     req.user = rows[0];
     next();
   } catch (err) {
     if (err.name === "TokenExpiredError") {
-      return res.status(401).json({ success: false, message: "Token expired." });
+      return res.status(401).json({ success: false, message: "Session expired. Please log in again." });
     }
     if (err.name === "JsonWebTokenError") {
-      return res.status(401).json({ success: false, message: "Invalid token." });
+      return res.status(401).json({ success: false, message: "Login is not valid. Please log in again." });
     }
     next(err);
   }
@@ -48,9 +48,9 @@ const authenticate = async (req, res, next) => {
  */
 const authorize = (...roles) => {
   return (req, res, next) => {
-    if (!req.user) return res.status(401).json({ success: false, message: "Not authenticated." });
+    if (!req.user) return res.status(401).json({ success: false, message: "Please log in." });
     if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ success: false, message: "Insufficient permissions." });
+      return res.status(403).json({ success: false, message: "You don't have permission to do this." });
     }
     next();
   };

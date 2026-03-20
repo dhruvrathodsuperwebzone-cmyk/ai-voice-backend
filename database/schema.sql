@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS leads (
   phone VARCHAR(50),
   source VARCHAR(100),
   hotel_id INT,
+  agent_id INT,
   rooms INT,
   location VARCHAR(255),
   status ENUM('new', 'contacted', 'qualified', 'converted', 'lost') DEFAULT 'new',
@@ -50,7 +51,8 @@ CREATE TABLE IF NOT EXISTS leads (
   notes TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (hotel_id) REFERENCES hotels(id) ON DELETE SET NULL
+  FOREIGN KEY (hotel_id) REFERENCES hotels(id) ON DELETE SET NULL,
+  FOREIGN KEY (agent_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
 -- ============================================

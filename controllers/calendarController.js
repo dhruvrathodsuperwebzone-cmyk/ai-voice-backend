@@ -227,7 +227,7 @@ async function availability(req, res) {
     if (err.code === "LINK_GOOGLE_CALENDAR") {
       return res.status(400).json({
         success: false,
-        message: "Link Google Calendar first: GET /api/calendar/oauth/url then POST /api/calendar/oauth/token with the code.",
+        message: "Connect your Google Calendar first.",
       });
     }
     const gErr = err.response?.data?.error || err.errors?.[0] || err.message;

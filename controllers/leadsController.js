@@ -12,6 +12,7 @@ async function ensureLeadColumns() {
     "ALTER TABLE leads ADD COLUMN rooms INT",
     "ALTER TABLE leads ADD COLUMN location VARCHAR(255)",
     "ALTER TABLE leads ADD COLUMN tags VARCHAR(500)",
+    "ALTER TABLE leads ADD COLUMN agent_id INT",
   ];
   for (const sql of alters) {
     try {
@@ -40,6 +41,7 @@ function leadRowToObject(row) {
     status: row.status || "new",
     tags: row.tags || null,
     notes: row.notes || null,
+    agent_id: row.agent_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     source: row.source || null,
@@ -128,12 +130,20 @@ async function create(req, res) {
  */
 async function list(req, res) {
   try {
+    await ensureLeadColumns();
     const { search, status, page = 1, limit = 10 } = req.query;
     const offset = (Math.max(1, parseInt(page, 10)) - 1) * Math.min(100, Math.max(1, parseInt(limit, 10)));
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10)));
 
     let where = [];
     let params = [];
+
+    if (req.user?.role === "agent") {
+      where.push("l.agent_id = ?");
+      params.push(req.user.id);
+    } else if (req.user?.role === "viewer") {
+      return res.status(403).json({ success: false, message: "You don't have permission to view leads." });
+    }
 
     if (search && search.trim()) {
       const term = `%${search.trim()}%`;
@@ -163,6 +173,10 @@ async function list(req, res) {
           where.push("l.status = ?");
           listParams.push(status);
         }
+        if (req.user?.role === "agent") {
+          where.push("l.agent_id = ?");
+          listParams.push(req.user.id);
+        }
         whereClause = "WHERE " + where.join(" AND ");
         const [countResult] = await pool.query(`SELECT COUNT(*) AS total FROM leads l ${whereClause}`, listParams);
         total = countResult[0].total;
@@ -187,14 +201,61 @@ async function list(req, res) {
  */
 async function getById(req, res) {
   try {
+    await ensureLeadColumns();
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid lead id." });
     const [rows] = await pool.query("SELECT * FROM leads WHERE id = ?", [id]);
     if (!rows.length) return res.status(404).json({ success: false, message: "Lead not found." });
+    if (req.user?.role === "agent") {
+      const lead = rows[0];
+      if (lead.agent_id == null || lead.agent_id !== req.user.id) {
+        return res.status(403).json({ success: false, message: "This lead isn't assigned to you." });
+      }
+    }
     res.json({ success: true, data: leadRowToObject(rows[0]) });
   } catch (err) {
     console.error("Get lead error:", err);
     res.status(500).json({ success: false, message: "Failed to get lead." });
+  }
+}
+
+/**
+ * PUT /api/leads/:id/assign-agent (admin)
+ * Body: { agent_id } or { agent_id: null } to unassign
+ */
+async function assignAgentToLead(req, res) {
+  try {
+    await ensureLeadColumns();
+    const leadId = parseInt(req.params.id, 10);
+    if (isNaN(leadId)) return res.status(400).json({ success: false, message: "Invalid request." });
+
+    const agentIdRaw = req.body?.agent_id;
+    const agentId =
+      agentIdRaw === null || agentIdRaw === "" || agentIdRaw === undefined
+        ? null
+        : parseInt(agentIdRaw, 10);
+
+    if (agentIdRaw !== null && agentIdRaw !== "" && agentIdRaw !== undefined && (Number.isNaN(agentId) || agentId < 0)) {
+      return res.status(400).json({ success: false, message: "Choose a valid agent." });
+    }
+
+    if (agentId != null) {
+      const [users] = await pool.query("SELECT id FROM users WHERE id = ? AND role = 'agent'", [agentId]);
+      if (!users.length) {
+        return res.status(400).json({ success: false, message: "Choose a valid agent." });
+      }
+    }
+
+    const [leadRows] = await pool.query("SELECT id FROM leads WHERE id = ?", [leadId]);
+    if (!leadRows.length) return res.status(404).json({ success: false, message: "Lead not found." });
+
+    await pool.query("UPDATE leads SET agent_id = ? WHERE id = ?", [agentId, leadId]);
+    const [updated] = await pool.query("SELECT * FROM leads WHERE id = ?", [leadId]);
+
+    res.json({ success: true, data: leadRowToObject(updated[0]) });
+  } catch (err) {
+    console.error("Assign agent error:", err);
+    res.status(500).json({ success: false, message: "Could not assign lead. Please try again." });
   }
 }
 
@@ -205,7 +266,7 @@ async function getById(req, res) {
 async function update(req, res) {
   try {
     const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid lead id." });
+    if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid request." });
     const {
       hotel_name,
       owner_name,
@@ -262,7 +323,7 @@ async function update(req, res) {
     res.json({ success: true, data: leadRowToObject(updated[0]) });
   } catch (err) {
     console.error("Update lead error:", err);
-    res.status(500).json({ success: false, message: "Failed to update lead." });
+    res.status(500).json({ success: false, message: "Could not update lead. Please try again." });
   }
 }
 
@@ -272,13 +333,13 @@ async function update(req, res) {
 async function remove(req, res) {
   try {
     const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid lead id." });
+    if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid request." });
     const [r] = await pool.query("DELETE FROM leads WHERE id = ?", [id]);
     if (r.affectedRows === 0) return res.status(404).json({ success: false, message: "Lead not found." });
     res.json({ success: true, message: "Lead deleted." });
   } catch (err) {
     console.error("Delete lead error:", err);
-    res.status(500).json({ success: false, message: "Failed to delete lead." });
+    res.status(500).json({ success: false, message: "Could not delete lead. Please try again." });
   }
 }
 
@@ -406,4 +467,4 @@ function parseCsvLine(line) {
   return out;
 }
 
-module.exports = { create, list, getById, update, remove, importCsv };
+module.exports = { create, list, getById, update, remove, importCsv, assignAgentToLead };
