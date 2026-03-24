@@ -12,6 +12,9 @@ router.post("/", authenticate, authorize("admin"), leadsController.create);
 // GET /api/leads?search=&status=&page=&limit= (admin + agent)
 router.get("/", authenticate, leadsController.list);
 
+// GET /api/leads/all?search=&status= (admin + agent, no pagination)
+router.get("/all", authenticate, leadsController.listAll);
+
 // POST /api/leads/import (must be before /:id to avoid "import" as id)
 router.post("/import", authenticate, authorize("admin"), upload.single("file"), leadsController.importCsv);
 

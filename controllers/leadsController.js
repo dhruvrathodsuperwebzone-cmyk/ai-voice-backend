@@ -28,6 +28,29 @@ async function ensureLeadColumns() {
   columnsChecked = true;
 }
 
+function getCreateLeadErrorMessage(err) {
+  if (!err) return "Failed to create lead.";
+
+  // Foreign key: hotel_id doesn't exist
+  if (err.code === "ER_NO_REFERENCED_ROW_2" || err.errno === 1452) {
+    return "Selected hotel does not exist. Please choose a valid hotel.";
+  }
+  if (err.code === "ER_DATA_TOO_LONG" || err.errno === 1406) {
+    return "One of the fields is too long. Please shorten the input and try again.";
+  }
+  if (err.code === "ER_BAD_NULL_ERROR" || err.errno === 1048) {
+    return "A required field is missing. Please check the form and try again.";
+  }
+  if (err.code === "ER_TRUNCATED_WRONG_VALUE_FOR_FIELD" || err.errno === 1366) {
+    return "One of the field values is invalid. Please check the form and try again.";
+  }
+  if (err.code === "ECONNREFUSED" || err.code === "PROTOCOL_CONNECTION_LOST") {
+    return "Database connection issue. Please try again in a moment.";
+  }
+
+  return "Failed to create lead.";
+}
+
 function leadRowToObject(row) {
   if (!row) return null;
   return {
@@ -70,13 +93,40 @@ async function create(req, res) {
       source,
       hotel_id,
     } = req.body;
+
     const name = owner_name || "Unknown";
     if (!name.trim()) {
       return res.status(400).json({ success: false, message: "owner_name is required." });
     }
     const validStatus = STATUSES.includes(status) ? status : "new";
     const sourceVal = source != null && source !== "" ? String(source).trim() : null;
-    const hotelIdVal = hotel_id != null && hotel_id !== "" ? parseInt(hotel_id, 10) : null;
+
+    const hotelIdVal =
+      hotel_id != null && hotel_id !== "" ? Number.parseInt(hotel_id, 10) : null;
+    if (hotelIdVal != null && Number.isNaN(hotelIdVal)) {
+      return res.status(400).json({ success: false, message: "Choose a valid hotel id." });
+    }
+
+    const roomsVal = rooms != null && rooms !== "" ? Number.parseInt(rooms, 10) : null;
+    if (roomsVal != null && Number.isNaN(roomsVal)) {
+      return res.status(400).json({ success: false, message: "Rooms must be a valid number." });
+    }
+    if (roomsVal != null && roomsVal < 0) {
+      return res.status(400).json({ success: false, message: "Rooms cannot be negative." });
+    }
+
+    const tagsVal = tags != null ? String(tags).trim() : null;
+    if (tagsVal != null && tagsVal.length > 500) {
+      return res.status(400).json({ success: false, message: "Tags are too long (max 500 characters)." });
+    }
+
+    // If hotel_id is provided, ensure it exists so we don't hit foreign-key constraint 500s.
+    if (hotelIdVal != null) {
+      const [hotelRows] = await pool.query("SELECT id FROM hotels WHERE id = ?", [hotelIdVal]);
+      if (!hotelRows.length) {
+        return res.status(400).json({ success: false, message: "Selected hotel does not exist. Please choose a valid hotel." });
+      }
+    }
 
     let r;
     try {
@@ -90,11 +140,11 @@ async function create(req, res) {
           email?.trim() || null,
           phone?.trim() || null,
           sourceVal,
-          isNaN(hotelIdVal) ? null : hotelIdVal,
-          rooms != null ? parseInt(rooms, 10) : null,
+          hotelIdVal,
+          roomsVal,
           location?.trim() || null,
           validStatus,
-          tags?.trim() || null,
+          tagsVal,
           notes?.trim() || null,
         ]
       );
@@ -107,7 +157,7 @@ async function create(req, res) {
           .join(" | ") || null;
         [r] = await pool.query(
           "INSERT INTO leads (name, email, phone, source, hotel_id, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          [name.trim(), email?.trim() || null, phone?.trim() || null, sourceVal, isNaN(hotelIdVal) ? null : hotelIdVal, validStatus, notesText]
+          [name.trim(), email?.trim() || null, phone?.trim() || null, sourceVal, hotelIdVal, validStatus, notesText]
         );
       } else throw insertErr;
     }
@@ -115,10 +165,20 @@ async function create(req, res) {
       "SELECT * FROM leads WHERE id = ?",
       [r.insertId]
     );
-    res.status(201).json({ success: true, data: leadRowToObject(rows[0]) });
+    res.status(201).json({
+      success: true,
+      message: "Lead created successfully.",
+      data: leadRowToObject(rows[0]),
+    });
   } catch (err) {
     console.error("Create lead error:", err);
-    res.status(500).json({ success: false, message: "Failed to create lead." });
+    const message = getCreateLeadErrorMessage(err);
+    res.status(500).json({
+      success: false,
+      message,
+      error_code: err?.code || null,
+      errno: err?.errno || null,
+    });
   }
 }
 
@@ -192,6 +252,64 @@ async function list(req, res) {
     });
   } catch (err) {
     console.error("List leads error:", err);
+    res.status(500).json({ success: false, message: "Failed to list leads." });
+  }
+}
+
+/**
+ * GET /api/leads/all
+ * Returns all leads (no pagination).
+ */
+async function listAll(req, res) {
+  try {
+    await ensureLeadColumns();
+    const { search, status } = req.query;
+
+    let where = [];
+    let params = [];
+
+    if (req.user?.role === "agent") {
+      where.push("l.agent_id = ?");
+      params.push(req.user.id);
+    } else if (req.user?.role === "viewer") {
+      return res.status(403).json({ success: false, message: "You don't have permission to view leads." });
+    }
+
+    if (search && search.trim()) {
+      const term = `%${search.trim()}%`;
+      where.push("(l.hotel_name LIKE ? OR l.owner_name LIKE ? OR l.name LIKE ? OR l.email LIKE ? OR l.phone LIKE ? OR l.location LIKE ? OR l.notes LIKE ?)");
+      params.push(term, term, term, term, term, term, term);
+    }
+    if (status && STATUSES.includes(status)) {
+      where.push("l.status = ?");
+      params.push(status);
+    }
+
+    let whereClause = where.length ? "WHERE " + where.join(" AND ") : "";
+    let rows;
+    try {
+      [rows] = await pool.query(`SELECT l.* FROM leads l ${whereClause} ORDER BY l.created_at DESC`);
+    } catch (listErr) {
+      if ((listErr.code === "ER_BAD_FIELD_ERROR" || listErr.errno === 1054) && search && search.trim()) {
+        const term = `%${search.trim()}%`;
+        where = ["(l.name LIKE ? OR l.email LIKE ? OR l.phone LIKE ? OR l.notes LIKE ?)"];
+        params = [term, term, term, term];
+        if (status && STATUSES.includes(status)) {
+          where.push("l.status = ?");
+          params.push(status);
+        }
+        if (req.user?.role === "agent") {
+          where.push("l.agent_id = ?");
+          params.push(req.user.id);
+        }
+        whereClause = "WHERE " + where.join(" AND ");
+        [rows] = await pool.query(`SELECT l.* FROM leads l ${whereClause} ORDER BY l.created_at DESC`, params);
+      } else throw listErr;
+    }
+
+    res.json({ success: true, data: rows.map(leadRowToObject) });
+  } catch (err) {
+    console.error("List all leads error:", err);
     res.status(500).json({ success: false, message: "Failed to list leads." });
   }
 }
@@ -467,4 +585,4 @@ function parseCsvLine(line) {
   return out;
 }
 
-module.exports = { create, list, getById, update, remove, importCsv, assignAgentToLead };
+module.exports = { create, list, listAll, getById, update, remove, importCsv, assignAgentToLead };

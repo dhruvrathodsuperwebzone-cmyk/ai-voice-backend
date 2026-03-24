@@ -9,6 +9,9 @@ router.post("/scripts", scriptsController.create);
 // GET /api/scripts (list; must be before /:id)
 router.get("/scripts", scriptsController.list);
 
+// GET /api/scripts/names (dropdown-friendly)
+router.get("/scripts/names", scriptsController.listNames);
+
 // GET /api/scripts/:id
 router.get("/scripts/:id", scriptsController.getById);
 

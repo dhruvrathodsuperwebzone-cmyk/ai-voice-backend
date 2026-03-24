@@ -56,6 +56,13 @@ function toOptionalString(v) {
   return s || null;
 }
 
+async function getScriptIdByName(scriptName) {
+  const scriptNameVal = toOptionalString(scriptName);
+  if (!scriptNameVal) return null;
+  const [rows] = await pool.query("SELECT id FROM scripts WHERE name = ? LIMIT 1", [scriptNameVal]);
+  return rows.length ? rows[0].id : null;
+}
+
 function normalizeLeadList(lead_list) {
   if (lead_list == null) return [];
   if (Array.isArray(lead_list)) return lead_list.map((x) => toIntOrNull(x)).filter((x) => x != null);
@@ -121,6 +128,7 @@ function campaignRowToObject(row, progress) {
     id: row.id,
     name: row.name,
     script_id: row.script_id ?? null,
+    script_name: row.script_name ?? null,
     schedule,
     timezone: row.timezone ?? null,
     call_frequency: row.call_frequency ?? null,
@@ -147,6 +155,7 @@ async function create(req, res) {
     const {
       name,
       script_id,
+      script_name,
       schedule,
       timezone,
       call_frequency,
@@ -158,9 +167,18 @@ async function create(req, res) {
     if (!nameVal) return res.status(400).json({ success: false, message: "name is required." });
 
     const statusVal = CAMPAIGN_STATUSES.includes(String(status)) ? String(status) : "draft";
-    const scriptIdVal = toIntOrNull(script_id);
+    let scriptIdVal = script_id !== undefined ? toIntOrNull(script_id) : null;
     const callFreqVal = toIntOrNull(call_frequency);
     const tzVal = toOptionalString(timezone);
+
+    // Allow dropdown to send script_name (readable), but store script_id (numeric).
+    if (scriptIdVal == null && script_name !== undefined) {
+      const resolved = await getScriptIdByName(script_name);
+      if (!resolved) {
+        return res.status(400).json({ success: false, message: "Selected script not found." });
+      }
+      scriptIdVal = resolved;
+    }
 
     const scheduleVal =
       schedule == null ? null : typeof schedule === "string" ? (schedule.trim() || null) : JSON.stringify(schedule);
@@ -176,7 +194,13 @@ async function create(req, res) {
 
     if (leadIds.length) await setCampaignLeads(r.insertId, leadIds);
 
-    const [rows] = await pool.query("SELECT * FROM campaigns WHERE id = ?", [r.insertId]);
+    const [rows] = await pool.query(
+      `SELECT c.*, s.name AS script_name
+       FROM campaigns c
+       LEFT JOIN scripts s ON s.id = c.script_id
+       WHERE c.id = ?`,
+      [r.insertId]
+    );
     const progress = await getProgress(r.insertId);
     res.status(201).json({ success: true, data: campaignRowToObject(rows[0], progress) });
   } catch (err) {
@@ -210,7 +234,12 @@ async function list(req, res) {
     const [[countRow]] = await pool.query(`SELECT COUNT(*) AS total FROM campaigns c ${whereClause}`, params);
     const total = countRow.total;
     const [rows] = await pool.query(
-      `SELECT c.* FROM campaigns c ${whereClause} ORDER BY c.created_at DESC LIMIT ? OFFSET ?`,
+      `SELECT c.*, s.name AS script_name
+       FROM campaigns c
+       LEFT JOIN scripts s ON s.id = c.script_id
+       ${whereClause}
+       ORDER BY c.created_at DESC
+       LIMIT ? OFFSET ?`,
       [...params, limitNum, offset]
     );
 
@@ -234,7 +263,13 @@ async function getById(req, res) {
     await ensureCampaignSchema();
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) return res.status(400).json({ success: false, message: "Invalid campaign id." });
-    const [rows] = await pool.query("SELECT * FROM campaigns WHERE id = ?", [id]);
+    const [rows] = await pool.query(
+      `SELECT c.*, s.name AS script_name
+       FROM campaigns c
+       LEFT JOIN scripts s ON s.id = c.script_id
+       WHERE c.id = ?`,
+      [id]
+    );
     if (!rows.length) return res.status(404).json({ success: false, message: "Campaign not found." });
     const progress = await getProgress(id);
     res.json({ success: true, data: campaignRowToObject(rows[0], progress) });
@@ -263,7 +298,14 @@ async function update(req, res) {
     if (!nameVal) return res.status(400).json({ success: false, message: "name is required." });
 
     const statusVal = body.status !== undefined && CAMPAIGN_STATUSES.includes(String(body.status)) ? String(body.status) : current.status;
-    const scriptIdVal = body.script_id !== undefined ? toIntOrNull(body.script_id) : current.script_id;
+    let scriptIdVal = current.script_id;
+    if (body.script_id !== undefined) {
+      scriptIdVal = toIntOrNull(body.script_id);
+    } else if (body.script_name !== undefined) {
+      const resolved = await getScriptIdByName(body.script_name);
+      if (!resolved) return res.status(400).json({ success: false, message: "Selected script not found." });
+      scriptIdVal = resolved;
+    }
     const callFreqVal = body.call_frequency !== undefined ? toIntOrNull(body.call_frequency) : current.call_frequency;
     const tzVal = body.timezone !== undefined ? toOptionalString(body.timezone) : current.timezone;
     const scheduleVal = body.schedule !== undefined
@@ -280,7 +322,13 @@ async function update(req, res) {
 
     if (leadIds) await setCampaignLeads(id, leadIds);
 
-    const [updated] = await pool.query("SELECT * FROM campaigns WHERE id = ?", [id]);
+    const [updated] = await pool.query(
+      `SELECT c.*, s.name AS script_name
+       FROM campaigns c
+       LEFT JOIN scripts s ON s.id = c.script_id
+       WHERE c.id = ?`,
+      [id]
+    );
     const progress = await getProgress(id);
     res.json({ success: true, data: campaignRowToObject(updated[0], progress) });
   } catch (err) {

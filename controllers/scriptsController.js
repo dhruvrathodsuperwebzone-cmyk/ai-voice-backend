@@ -94,6 +94,24 @@ async function list(req, res) {
 }
 
 /**
+ * GET /api/scripts/names
+ * Returns only { id, name } for building dropdowns.
+ */
+async function listNames(req, res) {
+  try {
+    await ensureScriptsTable();
+    const [rows] = await pool.query("SELECT id, name FROM scripts ORDER BY name ASC");
+    res.json({
+      success: true,
+      data: rows.map((r) => ({ id: r.id, name: r.name ?? null })),
+    });
+  } catch (err) {
+    console.error("List script names error:", err);
+    res.status(500).json({ success: false, message: "Failed to list scripts." });
+  }
+}
+
+/**
  * GET /api/scripts/:id
  */
 async function getById(req, res) {
@@ -151,4 +169,4 @@ async function remove(req, res) {
   }
 }
 
-module.exports = { create, list, getById, update, remove };
+module.exports = { create, list, listNames, getById, update, remove };
