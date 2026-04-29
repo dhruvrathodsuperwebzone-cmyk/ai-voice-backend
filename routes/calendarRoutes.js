@@ -16,8 +16,13 @@ router.post("/calendar/oauth/token", authenticate, calendarController.oauthToken
 
 // Phase 9 — Calendar System
 router.get("/calendar/availability", authenticate, calendarController.availability);
+router.get("/calendar/events", authenticate, calendarController.listEvents);
 router.post("/calendar/book", authenticate, calendarController.book);
 router.put("/calendar/reschedule/:eventId", authenticate, calendarController.reschedule);
 router.delete("/calendar/cancel/:eventId", authenticate, calendarController.cancel);
+
+// Calendar "history" storage (simple table)
+// GET /api/calender/all
+router.get("/calender/all", authenticate, calendarController.listAllCalenderData);
 
 module.exports = router;

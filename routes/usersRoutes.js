@@ -4,8 +4,9 @@ const { authenticate, authorize } = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
-// Admin only
-router.get("/users", authenticate, authorize("admin"), usersController.list);
+// More specific paths before /users
+router.get("/users/names", authenticate, authorize("admin", "viewer"), usersController.listNames);
+router.get("/users", authenticate, authorize("admin", "viewer"), usersController.list);
 router.post("/users", authenticate, authorize("admin"), usersController.create);
 
 module.exports = router;

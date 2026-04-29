@@ -1,0 +1,14 @@
+{
+  "payment_id": 11,
+  "provider": "razorpay",
+  "razorpay_payment_link_id": "plink_SWb6elBhRyftHD",
+  "amount": 45,
+  "currency": "INR",
+  "description": "Est velit",
+  "customer": {
+    "name": "Ex optio",
+    "email": "hagaqo@mailinator.com",
+    "phone": "Irure omni"
+  },
+  "created_at": "2026-03-28T09:33:05.590Z"
+}

@@ -10,6 +10,9 @@ const scriptRoutes = require("./routes/scriptRoutes");
 const paymentRoutes = require("./routes/paymentRoutes");
 const calendarRoutes = require("./routes/calendarRoutes");
 const usersRoutes = require("./routes/usersRoutes");
+const voiceRoutes = require("./routes/voiceRoutes");
+const outboundCallRoutes = require("./routes/outboundCallRoutes");
+const { startCampaignDialer } = require("./services/campaignDialer");
 
 const app = express();
 
@@ -40,8 +43,11 @@ app.use("/api", campaignRoutes);
 app.use("/api", scriptRoutes);
 app.use("/api", paymentRoutes);
 app.use("/api", calendarRoutes);
+app.use("/api", outboundCallRoutes);
+app.use("/api", voiceRoutes);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  startCampaignDialer();
 });

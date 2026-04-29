@@ -1,0 +1,14 @@
+{
+  "payment_id": 14,
+  "provider": "razorpay",
+  "razorpay_payment_link_id": "plink_SYZ8GfkFzpzh2t",
+  "amount": 4999,
+  "currency": "INR",
+  "description": "AI Receptionist Setup",
+  "customer": {
+    "name": "Rahul Sharma",
+    "email": "rahul@example.com",
+    "phone": "+919876543210"
+  },
+  "created_at": "2026-04-02T08:55:13.890Z"
+}

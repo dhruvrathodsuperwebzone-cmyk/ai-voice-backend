@@ -41,17 +41,14 @@ CREATE TABLE IF NOT EXISTS leads (
   owner_name VARCHAR(255),
   email VARCHAR(255),
   phone VARCHAR(50),
-  source VARCHAR(100),
-  hotel_id INT,
   agent_id INT,
+  voice_agent_id INT,
   rooms INT,
   location VARCHAR(255),
   status ENUM('new', 'contacted', 'qualified', 'converted', 'lost') DEFAULT 'new',
-  tags VARCHAR(500),
   notes TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (hotel_id) REFERENCES hotels(id) ON DELETE SET NULL,
   FOREIGN KEY (agent_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
@@ -61,14 +58,12 @@ CREATE TABLE IF NOT EXISTS leads (
 CREATE TABLE IF NOT EXISTS campaigns (
   id INT PRIMARY KEY AUTO_INCREMENT,
   name VARCHAR(255) NOT NULL,
-  hotel_id INT,
   type VARCHAR(100),
   status ENUM('draft', 'active', 'paused', 'completed') DEFAULT 'draft',
   start_date DATE,
   end_date DATE,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  FOREIGN KEY (hotel_id) REFERENCES hotels(id) ON DELETE SET NULL
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 );
 
 -- ============================================
@@ -78,9 +73,13 @@ CREATE TABLE IF NOT EXISTS calls (
   id INT PRIMARY KEY AUTO_INCREMENT,
   lead_id INT,
   campaign_id INT,
-  duration_seconds INT DEFAULT 0,
   outcome VARCHAR(100),
-  recording_url TEXT,
+  provider VARCHAR(50),
+  agent_id VARCHAR(100),
+  to_number VARCHAR(50),
+  from_number VARCHAR(50),
+  status VARCHAR(100),
+  raw_response TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE SET NULL,
   FOREIGN KEY (campaign_id) REFERENCES campaigns(id) ON DELETE SET NULL
@@ -149,4 +148,44 @@ CREATE TABLE IF NOT EXISTS meetings (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (lead_id) REFERENCES leads(id) ON DELETE SET NULL,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- ============================================
+-- Users: which admin created this account (for agent dropdown / isolation)
+-- ============================================
+-- On existing DBs run: ALTER TABLE users ADD COLUMN created_by INT NULL;
+-- FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL;
+
+-- ============================================
+-- 8b. VOICE AGENTS (OmniDimension; local cache per creator)
+-- ============================================
+CREATE TABLE IF NOT EXISTS voice_agents (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  name VARCHAR(255) NOT NULL,
+  description TEXT,
+  external_id VARCHAR(255) NULL,
+  integrations TEXT NULL,
+  created_by INT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+);
+
+-- ============================================
+-- 9. OUTBOUND CALL REQUESTS (Calls UI: name + phone + agent per initiator)
+-- ============================================
+CREATE TABLE IF NOT EXISTS outbound_call_requests (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  initiated_by_user_id INT NOT NULL,
+  contact_name VARCHAR(255) NOT NULL,
+  phone VARCHAR(50) NOT NULL,
+  voice_agent_id INT NULL,
+  selected_agent_id INT NULL,
+  status VARCHAR(50) DEFAULT 'queued',
+  provider_response TEXT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  FOREIGN KEY (initiated_by_user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (voice_agent_id) REFERENCES voice_agents(id) ON DELETE SET NULL,
+  FOREIGN KEY (selected_agent_id) REFERENCES users(id) ON DELETE SET NULL
 );

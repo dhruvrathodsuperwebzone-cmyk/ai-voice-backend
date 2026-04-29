@@ -1,0 +1,14 @@
+{
+  "payment_id": 12,
+  "provider": "razorpay",
+  "razorpay_payment_link_id": "plink_SWcSd3Xt2j7Weg",
+  "amount": 5,
+  "currency": "USD",
+  "description": "Ullamco cu",
+  "customer": {
+    "name": "Impedit t",
+    "email": "daxabujaw@mailinator.com",
+    "phone": "Aute verit"
+  },
+  "created_at": "2026-03-28T10:52:35.378Z"
+}

@@ -20,6 +20,37 @@ async function ensureCalendarCredentialsTable() {
   tableChecked = true;
 }
 
+let calenderTableChecked = false;
+async function ensureCalenderTable() {
+  if (calenderTableChecked) return;
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS calender (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      user_id INT NULL,
+      title VARCHAR(255) NOT NULL,
+      date DATE NOT NULL,
+      time TIME NOT NULL,
+      payload JSON NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+    )`
+  );
+  const alters = [
+    "ALTER TABLE calender ADD COLUMN google_event_id VARCHAR(255) NULL",
+    "ALTER TABLE calender ADD COLUMN source VARCHAR(50) NULL DEFAULT 'manual'",
+  ];
+  for (const sql of alters) {
+    try {
+      await pool.query(sql);
+    } catch (e) {
+      const isDup = e.code === "ER_DUP_FIELDNAME" || e.errno === 1060;
+      if (!isDup) throw e;
+    }
+  }
+  calenderTableChecked = true;
+}
+
 function getOAuth2Client() {
   const clientId = String(process.env.GOOGLE_CLIENT_ID || "").trim();
   const clientSecret = String(process.env.GOOGLE_CLIENT_SECRET || "").trim();
@@ -241,6 +272,143 @@ async function availability(req, res) {
 }
 
 /**
+ * GET /api/calendar/events?timeMin=ISO&timeMax=ISO&calendarId=primary&maxResults=50
+ * Returns Google Calendar events for the connected account/user.
+ */
+async function listEvents(req, res) {
+  try {
+    await ensureCalenderTable();
+    let timeMin = fixQueryDateTime(req.query.timeMin);
+    let timeMax = fixQueryDateTime(req.query.timeMax);
+    const calendarId = calendarIdFromQuery(req);
+    const maxResults = Math.min(250, Math.max(1, parseInt(req.query.maxResults, 10) || 50));
+
+    // Default range: now -> next 30 days
+    if (!timeMin) timeMin = new Date().toISOString();
+    if (!timeMax) {
+      const d = new Date();
+      d.setDate(d.getDate() + 30);
+      timeMax = d.toISOString();
+    }
+
+    const auth = await getAuthForUser(req.user.id);
+    const calendar = google.calendar({ version: "v3", auth });
+
+    const syncAll = req.query.syncAll === "true" || req.query.all === "true";
+    let items = [];
+    if (syncAll) {
+      let pageToken = undefined;
+      let pageCount = 0;
+      do {
+        const events = await calendar.events.list({
+          calendarId,
+          ...(timeMin ? { timeMin } : {}),
+          ...(timeMax ? { timeMax } : {}),
+          singleEvents: true,
+          orderBy: "startTime",
+          maxResults: 250,
+          pageToken,
+        });
+        const pageItems = events.data.items || [];
+        items = items.concat(pageItems);
+        pageToken = events.data.nextPageToken || undefined;
+        pageCount += 1;
+        if (pageCount > 40) break; // hard safety cap
+      } while (pageToken);
+    } else {
+      const events = await calendar.events.list({
+        calendarId,
+        timeMin,
+        timeMax,
+        singleEvents: true,
+        orderBy: "startTime",
+        maxResults,
+      });
+      items = events.data.items || [];
+    }
+    const userId = req.user.id;
+    const rowsToStore = items
+      .map((ev) => {
+        const title = String(ev.summary || "Google Event").trim();
+        const startDateTime = ev?.start?.dateTime || null;
+        const startDateOnly = ev?.start?.date || null;
+
+        let date = null;
+        let time = "00:00:00";
+        if (startDateTime) {
+          const normalized = String(startDateTime).replace(" ", "T");
+          const dt = new Date(normalized);
+          if (!Number.isNaN(dt.getTime())) {
+            date = dt.toISOString().slice(0, 10);
+            time = dt.toISOString().slice(11, 19);
+          }
+        } else if (startDateOnly) {
+          date = String(startDateOnly).slice(0, 10);
+        }
+
+        if (!date || !ev.id) return null;
+        return {
+          google_event_id: String(ev.id),
+          title: title || "Google Event",
+          date,
+          time,
+          payload: JSON.stringify({
+            status: ev.status || null,
+            htmlLink: ev.htmlLink || null,
+            start: ev.start || null,
+            end: ev.end || null,
+          }),
+        };
+      })
+      .filter(Boolean);
+
+    for (const row of rowsToStore) {
+      const [existing] = await pool.query(
+        "SELECT id FROM calender WHERE user_id = ? AND google_event_id = ? LIMIT 1",
+        [userId, row.google_event_id]
+      );
+      if (existing.length) {
+        await pool.query(
+          "UPDATE calender SET title = ?, date = ?, time = ?, payload = ?, source = 'google' WHERE id = ?",
+          [row.title, row.date, row.time, row.payload, existing[0].id]
+        );
+      } else {
+        await pool.query(
+          "INSERT INTO calender (user_id, title, date, time, payload, google_event_id, source) VALUES (?, ?, ?, ?, ?, ?, 'google')",
+          [userId, row.title, row.date, row.time, row.payload, row.google_event_id]
+        );
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        calendarId,
+        timeMin,
+        timeMax,
+        syncAll,
+        items,
+        synced_to_calender_table: rowsToStore.length,
+      },
+    });
+  } catch (err) {
+    if (err.code === "LINK_GOOGLE_CALENDAR") {
+      return res.status(400).json({
+        success: false,
+        message: "Connect your Google Calendar first.",
+      });
+    }
+    const gErr = err.response?.data?.error || err.errors?.[0] || err.message;
+    console.error("Calendar list events error:", err.response?.data || err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to fetch calendar events.",
+      details: typeof gErr === "object" ? gErr : String(gErr),
+    });
+  }
+}
+
+/**
  * POST /api/calendar/book
  * Body: { summary, description?, start, end, calendarId?, attendees?: [{email}] }
  * start/end: Google Calendar API format, e.g. { dateTime: "2026-03-20T10:00:00+05:30", timeZone: "Asia/Kolkata" }
@@ -338,13 +506,135 @@ async function cancel(req, res) {
   }
 }
 
+/**
+ * POST /api/calender
+ * Body: { title, date, time }
+ */
+async function createCalenderEntry(req, res) {
+  try {
+    await ensureCalenderTable();
+    const { title, date, time } = req.body || {};
+
+    const titleVal = title != null ? String(title).trim() : "";
+    const dateVal = date != null ? String(date).trim() : "";
+    const timeVal = time != null ? String(time).trim() : "";
+
+    if (!titleVal || !dateVal || !timeVal) {
+      return res.status(400).json({ success: false, message: "title, date, and time are required." });
+    }
+
+    const [r] = await pool.query(
+      "INSERT INTO calender (user_id, title, date, time, payload) VALUES (?, ?, ?, ?, ?)",
+      [req.user?.id || null, titleVal, dateVal, timeVal, JSON.stringify({ title: titleVal, date: dateVal, time: timeVal })]
+    );
+
+    const [rows] = await pool.query("SELECT id, user_id, title, date, time, payload, created_at, updated_at FROM calender WHERE id = ?", [r.insertId]);
+    res.status(201).json({ success: true, data: rows[0] });
+  } catch (err) {
+    console.error("Create calender entry error:", err);
+    res.status(500).json({ success: false, message: "Failed to save calender data." });
+  }
+}
+
+/**
+ * GET /api/calender
+ * Returns all saved calender entries.
+ */
+async function listCalenderEntries(req, res) {
+  try {
+    await ensureCalenderTable();
+    const [rows] = await pool.query(
+      "SELECT id, user_id, title, date, time, payload, created_at, updated_at FROM calender WHERE user_id = ? ORDER BY created_at DESC",
+      [req.user.id]
+    );
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error("List calender entries error:", err);
+    res.status(500).json({ success: false, message: "Failed to fetch calender data." });
+  }
+}
+
+/**
+ * GET /api/calender/all
+ * Returns all rows from calender table.
+ */
+async function listAllCalenderData(req, res) {
+  try {
+    await ensureCalenderTable();
+    const [rows] = await pool.query(
+      "SELECT id, user_id, title, date, time, google_event_id, source, payload, created_at, updated_at FROM calender WHERE user_id = ? ORDER BY created_at DESC",
+      [req.user.id]
+    );
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    console.error("List all calender data error:", err);
+    res.status(500).json({ success: false, message: "Failed to fetch all calender data." });
+  }
+}
+
+/**
+ * GET /api/calender/table?page=1&limit=20&source=google|manual&user_id=
+ * Direct read API for calender table data.
+ */
+async function listCalenderTableData(req, res) {
+  try {
+    await ensureCalenderTable();
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const offset = (page - 1) * limit;
+    const source = req.query.source ? String(req.query.source).trim().toLowerCase() : null;
+
+    const where = [];
+    const params = [];
+
+    if (source && ["google", "manual"].includes(source)) {
+      where.push("c.source = ?");
+      params.push(source);
+    }
+    // Always enforce per-user visibility (admins included).
+    where.push("c.user_id = ?");
+    params.push(req.user.id);
+
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    const [[countRow]] = await pool.query(`SELECT COUNT(*) AS total FROM calender c ${whereSql}`, params);
+    const total = countRow.total;
+
+    const [rows] = await pool.query(
+      `SELECT c.id, c.user_id, c.title, c.date, c.time, c.google_event_id, c.source, c.payload, c.created_at, c.updated_at
+       FROM calender c
+       ${whereSql}
+       ORDER BY c.date DESC, c.time DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
+    );
+
+    res.json({
+      success: true,
+      data: rows,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    });
+  } catch (err) {
+    console.error("List calender table data error:", err);
+    res.status(500).json({ success: false, message: "Failed to fetch calender table data." });
+  }
+}
+
 module.exports = {
   oauthGoogleCallback,
   oauthConfigDebug,
   oauthUrl,
   oauthToken,
   availability,
+  listEvents,
   book,
   reschedule,
   cancel,
+  createCalenderEntry,
+  listCalenderEntries,
+  listAllCalenderData,
 };

@@ -97,7 +97,7 @@ async function createPaymentLink(req, res) {
     const customer_phone = toOptionalString(customer.contact || customer.phone);
     const lead_id = body.lead_id != null && body.lead_id !== "" ? parseInt(body.lead_id, 10) : null;
 
-    const userId = req.user?.userId || null;
+    const userId = req.user?.id || null;
     const reference = `pay_${Date.now()}`;
 
     // Store pending record first
@@ -171,7 +171,7 @@ async function createPaymentLink(req, res) {
       }
     }
 
-    const [saved] = await pool.query("SELECT * FROM payments WHERE id = ?", [paymentId]);
+    const [saved] = await pool.query("SELECT * FROM payments WHERE id = ? AND user_id = ?", [paymentId, userId]);
     res.status(201).json({
       success: true,
       data: {
@@ -204,11 +204,14 @@ async function getPaymentStatus(req, res) {
 
     let payment;
     if (Number.isFinite(localId)) {
-      const [rows] = await pool.query("SELECT * FROM payments WHERE id = ?", [localId]);
+      const [rows] = await pool.query("SELECT * FROM payments WHERE id = ? AND user_id = ?", [localId, req.user.id]);
       if (!rows.length) return res.status(404).json({ success: false, message: "Payment not found." });
       payment = rows[0];
     } else if (paymentLinkId) {
-      const [rows] = await pool.query("SELECT * FROM payments WHERE razorpay_payment_link_id = ?", [paymentLinkId]);
+      const [rows] = await pool.query(
+        "SELECT * FROM payments WHERE razorpay_payment_link_id = ? AND user_id = ?",
+        [paymentLinkId, req.user.id]
+      );
       if (!rows.length) return res.status(404).json({ success: false, message: "Payment not found." });
       payment = rows[0];
     } else {
@@ -231,8 +234,11 @@ async function getPaymentStatus(req, res) {
       rpStatus === "cancelled" ? "failed" :
       "pending";
 
-    await pool.query("UPDATE payments SET razorpay_status = ?, status = ? WHERE id = ?", [rpStatus, mapped, payment.id]);
-    const [updated] = await pool.query("SELECT * FROM payments WHERE id = ?", [payment.id]);
+    await pool.query(
+      "UPDATE payments SET razorpay_status = ?, status = ? WHERE id = ? AND user_id = ?",
+      [rpStatus, mapped, payment.id, req.user.id]
+    );
+    const [updated] = await pool.query("SELECT * FROM payments WHERE id = ? AND user_id = ?", [payment.id, req.user.id]);
 
     res.json({ success: true, data: { payment: updated[0], razorpay: link } });
   } catch (err) {
@@ -253,6 +259,8 @@ async function listPayments(req, res) {
 
     const where = [];
     const params = [];
+    where.push("p.user_id = ?");
+    params.push(req.user.id);
     if (status && ["pending", "completed", "failed", "refunded"].includes(String(status))) {
       where.push("p.status = ?");
       params.push(String(status));
@@ -277,5 +285,67 @@ async function listPayments(req, res) {
   }
 }
 
-module.exports = { createPaymentLink, getPaymentStatus, listPayments };
+/**
+ * GET /api/payments/admin?page=&limit=&status=&user_id= | &userId=
+ * Admin and viewer (read-only). Lists all payments; pass user_id (or userId) to restrict to one user’s rows.
+ */
+async function listPaymentsAdmin(req, res) {
+  try {
+    await ensurePaymentColumns();
+    const { page = 1, limit = 10, status } = req.query;
+    const rawUserId = req.query.user_id ?? req.query.userId;
+    let filterUserId = null;
+    if (rawUserId != null && String(rawUserId).trim() !== "") {
+      const n = parseInt(String(rawUserId).trim(), 10);
+      if (!Number.isFinite(n) || n <= 0) {
+        return res.status(400).json({ success: false, message: "user_id must be a positive integer when provided." });
+      }
+      filterUserId = n;
+    }
+
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10)));
+    const offset = (Math.max(1, parseInt(page, 10)) - 1) * limitNum;
+
+    const where = [];
+    const params = [];
+    if (filterUserId != null) {
+      where.push("p.user_id = ?");
+      params.push(filterUserId);
+    }
+    if (status && ["pending", "completed", "failed", "refunded"].includes(String(status))) {
+      where.push("p.status = ?");
+      params.push(String(status));
+    }
+    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+    const [[countRow]] = await pool.query(`SELECT COUNT(*) AS total FROM payments p ${whereClause}`, params);
+    const total = countRow.total;
+    const [rows] = await pool.query(
+      `SELECT p.*, u.name AS user_name, u.email AS user_email, u.role AS user_role
+       FROM payments p
+       LEFT JOIN users u ON u.id = p.user_id
+       ${whereClause}
+       ORDER BY p.created_at DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limitNum, offset]
+    );
+
+    res.json({
+      success: true,
+      meta: { filtered_by_user_id: filterUserId },
+      data: rows,
+      pagination: {
+        page: Math.floor(offset / limitNum) + 1,
+        limit: limitNum,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limitNum)),
+      },
+    });
+  } catch (err) {
+    console.error("List payments admin error:", err);
+    res.status(500).json({ success: false, message: "Failed to list payments." });
+  }
+}
+
+module.exports = { createPaymentLink, getPaymentStatus, listPayments, listPaymentsAdmin };
 

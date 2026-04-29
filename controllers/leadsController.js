@@ -187,6 +187,7 @@ async function create(req, res) {
  * search: hotel_name, owner_name, email, phone, location
  * filters: status
  * pagination: page, limit
+ * Scope: agent = assigned leads only; admin & viewer = all leads (viewer read-only elsewhere).
  */
 async function list(req, res) {
   try {
@@ -201,9 +202,8 @@ async function list(req, res) {
     if (req.user?.role === "agent") {
       where.push("l.agent_id = ?");
       params.push(req.user.id);
-    } else if (req.user?.role === "viewer") {
-      return res.status(403).json({ success: false, message: "You don't have permission to view leads." });
     }
+    // admin + viewer: full list (read-only for viewer; POST/PUT/DELETE remain restricted on routes)
 
     if (search && search.trim()) {
       const term = `%${search.trim()}%`;
@@ -271,8 +271,6 @@ async function listAll(req, res) {
     if (req.user?.role === "agent") {
       where.push("l.agent_id = ?");
       params.push(req.user.id);
-    } else if (req.user?.role === "viewer") {
-      return res.status(403).json({ success: false, message: "You don't have permission to view leads." });
     }
 
     if (search && search.trim()) {
@@ -312,6 +310,95 @@ async function listAll(req, res) {
     console.error("List all leads error:", err);
     res.status(500).json({ success: false, message: "Failed to list leads." });
   }
+}
+
+/**
+ * GET /api/leads/by-creator (admin & viewer ? read-only for viewer)
+ * Query: user_id | userId | creator_id (required), optional search, status, page, limit
+ *
+ * Includes leads where that user **created** the row (`created_by`) **or** is the **assigned agent** (`agent_id`).
+ * Agents only see assigned leads on GET /api/leads; without `OR agent_id`, admin would see an empty list when
+ * an admin created leads but assigned them to that agent.
+ */
+async function listByCreator(req, res) {
+  try {
+    await ensureLeadColumns();
+    try {
+      await pool.query("ALTER TABLE leads ADD COLUMN created_by INT NULL");
+    } catch (e) {
+      const dup = e.code === "ER_DUP_FIELDNAME" || e.errno === 1060;
+      if (!dup) throw e;
+    }
+
+    const rawId = req.query.user_id ?? req.query.userId ?? req.query.creator_id;
+    const userId = parseInt(String(rawId ?? "").trim(), 10);
+    if (!Number.isFinite(userId) || userId < 1) {
+      return res.status(400).json({ success: false, message: "user_id, userId, or creator_id is required." });
+    }
+
+    const { search, status } = req.query;
+    const limitNum = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const pageNum = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const offset = (pageNum - 1) * limitNum;
+
+    const where = ["(l.created_by = ? OR l.agent_id = ?)"];
+    const params = [userId, userId];
+
+    if (search && String(search).trim()) {
+      const term = `%${String(search).trim()}%`;
+      where.push("(l.hotel_name LIKE ? OR l.owner_name LIKE ? OR l.name LIKE ? OR l.email LIKE ? OR l.phone LIKE ? OR l.location LIKE ? OR l.notes LIKE ?)");
+      params.push(term, term, term, term, term, term, term);
+    }
+    if (status && STATUSES.includes(String(status))) {
+      where.push("l.status = ?");
+      params.push(status);
+    }
+
+    const whereClause = `WHERE ${where.join(" AND ")}`;
+    let total;
+    let rows;
+    try {
+      const [countResult] = await pool.query(`SELECT COUNT(*) AS total FROM leads l ${whereClause}`, params);
+      total = countResult[0].total;
+      [rows] = await pool.query(
+        `SELECT l.* FROM leads l ${whereClause} ORDER BY l.created_at DESC LIMIT ? OFFSET ?`,
+        [...params, limitNum, offset]
+      );
+    } catch (listErr) {
+      if ((listErr.code === "ER_BAD_FIELD_ERROR" || listErr.errno === 1054) && search && String(search).trim()) {
+        const term = `%${String(search).trim()}%`;
+        const w2 = ["(l.created_by = ? OR l.agent_id = ?)", "(l.name LIKE ? OR l.email LIKE ? OR l.phone LIKE ? OR l.notes LIKE ?)"];
+        const p2 = [userId, userId, term, term, term, term];
+        if (status && STATUSES.includes(String(status))) {
+          w2.push("l.status = ?");
+          p2.push(status);
+        }
+        const wc2 = `WHERE ${w2.join(" AND ")}`;
+        const [countResult] = await pool.query(`SELECT COUNT(*) AS total FROM leads l ${wc2}`, p2);
+        total = countResult[0].total;
+        [rows] = await pool.query(`SELECT l.* FROM leads l ${wc2} ORDER BY l.created_at DESC LIMIT ? OFFSET ?`, [...p2, limitNum, offset]);
+      } else throw listErr;
+    }
+
+    res.json({
+      success: true,
+      data: rows.map(leadRowToObject),
+      pagination: { page: pageNum, limit: limitNum, total },
+    });
+  } catch (err) {
+    console.error("List leads by creator error:", err);
+    res.status(500).json({ success: false, message: "Failed to list leads." });
+  }
+}
+
+/** PUT /api/leads/admin/:id ? admin may edit any lead (same body as PUT /api/leads/:id). */
+async function adminUpdate(req, res) {
+  return update(req, res);
+}
+
+/** DELETE /api/leads/admin/:id ? admin may delete any lead. */
+async function adminRemove(req, res) {
+  return remove(req, res);
 }
 
 /**
@@ -585,4 +672,83 @@ function parseCsvLine(line) {
   return out;
 }
 
-module.exports = { create, list, listAll, getById, update, remove, importCsv, assignAgentToLead };
+/**
+ * Used by POST /api/voice/bulk-call/upload ? insert deduped contacts as leads.
+ * @returns {{ inserted: number, skipped_duplicates: number, errors: Array<{phone?: string, reason: string}> }}
+ */
+async function insertLeadsFromVoiceBulkUpload(contacts, user, options = {}) {
+  await ensureLeadColumns();
+  for (const sql of [
+    "ALTER TABLE leads ADD COLUMN created_by INT NULL",
+    "ALTER TABLE leads ADD COLUMN voice_agent_id INT NULL",
+  ]) {
+    try {
+      await pool.query(sql);
+    } catch (e) {
+      const dup = e.code === "ER_DUP_FIELDNAME" || e.errno === 1060;
+      if (!dup) throw e;
+    }
+  }
+
+  const createdBy = user?.id ?? null;
+  const voiceAgentDbId =
+    options.voiceAgentDbId != null && options.voiceAgentDbId !== ""
+      ? parseInt(String(options.voiceAgentDbId), 10)
+      : null;
+  const agentId = Number.isFinite(voiceAgentDbId) ? voiceAgentDbId : null;
+
+  let inserted = 0;
+  let skipped_duplicates = 0;
+  const errors = [];
+
+  for (const c of contacts || []) {
+    const phone = c?.phone_number != null ? String(c.phone_number).trim() : "";
+    if (!phone) {
+      errors.push({ reason: "missing phone_number" });
+      continue;
+    }
+    try {
+      const [existing] = await pool.query("SELECT id FROM leads WHERE phone = ? LIMIT 1", [phone]);
+      if (existing.length) {
+        skipped_duplicates += 1;
+        continue;
+      }
+      const display =
+        String(c.contact_name || c.name || c.owner_name || c.owner || "Contact").trim() || "Contact";
+      try {
+        await pool.query(
+          `INSERT INTO leads (name, hotel_name, owner_name, phone, status, notes, created_by, voice_agent_id)
+           VALUES (?, NULL, ?, ?, 'new', ?, ?, ?)`,
+          [display, display, phone, "voice_bulk_upload", createdBy, agentId]
+        );
+      } catch (insErr) {
+        if (insErr.code === "ER_BAD_FIELD_ERROR" || insErr.errno === 1054) {
+          await pool.query(
+            "INSERT INTO leads (name, phone, status, notes, created_by) VALUES (?, ?, 'new', ?, ?)",
+            [display, phone, "voice_bulk_upload", createdBy]
+          );
+        } else throw insErr;
+      }
+      inserted += 1;
+    } catch (e) {
+      errors.push({ phone, reason: e.message || "insert failed" });
+    }
+  }
+
+  return { inserted, skipped_duplicates, errors };
+}
+
+module.exports = {
+  create,
+  list,
+  listAll,
+  listByCreator,
+  getById,
+  update,
+  remove,
+  importCsv,
+  assignAgentToLead,
+  adminUpdate,
+  adminRemove,
+  insertLeadsFromVoiceBulkUpload,
+};

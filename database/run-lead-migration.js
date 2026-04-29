@@ -11,7 +11,6 @@ const ALTERS = [
   "ALTER TABLE leads ADD COLUMN owner_name VARCHAR(255)",
   "ALTER TABLE leads ADD COLUMN rooms INT",
   "ALTER TABLE leads ADD COLUMN location VARCHAR(255)",
-  "ALTER TABLE leads ADD COLUMN tags VARCHAR(500)",
 ];
 
 async function run() {
@@ -42,7 +41,7 @@ async function run() {
         }
       }
     }
-    console.log("Lead migration finished. hotel_name, owner_name, rooms, location, tags are now available.");
+    console.log("Lead migration finished. hotel_name, owner_name, rooms, location are now available.");
   } finally {
     if (conn) await conn.end();
   }
